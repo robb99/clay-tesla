@@ -1,340 +1,431 @@
 #!/usr/bin/env python3
 """
-clay-tesla - Tesla CLI control tool
-
-Control your Tesla Model 3 via command line using the Tesla API.
-
-Usage:
-    python3 clay_tesla.py status              # Get vehicle status
-    python3 clay_tesla.py climate 72         # Set climate to 72F
-    python3 clay_tesla.py lock               # Lock the car
-    python3 clay_tesla.py unlock             # Unlock the car
-    python3 clay_tesla.py honk               # Honk the horn
-    python3 clay_tesla.py flash              # Flash lights
-    python3 clay_tesla.py start              # Start remote control
-    python3 clay_tesla.py stop               # Stop remote control
-    python3 clay_tesla.py open frunk         # Open frunk
-    python3 clay_tesla.py open trunk         # Open trunk
-    python3 clay_tesla.py charge 80          # Set charge limit %
-    python3 clay_tesla.py wake               # Wake up the car
-    python3 clay_tesla.py where             # Get location
-
-Requirements:
-    pip install teslajsonpy
-
-Setup:
-    Set environment variables:
-        TESLA_EMAIL - your Tesla account email
-        TESLA_TOKEN - your Tesla refresh token
-    Or pass --email and --token flags
+clay-tesla - Tesla Vehicle Control CLI
+Control your Tesla from the command line using the Tesla API.
 """
 
-import os
-import sys
 import argparse
 import json
-from datetime import datetime
+import os
+import sys
+import subprocess
+from pathlib import Path
 
+# Try to import teslajsonpy
 try:
     import teslajsonpy
+    from teslajsonpy import Tesla
+    from teslajsonpy.controller import Controller
 except ImportError:
-    print("ERROR: teslajsonpy not installed.")
-    print("Install with: pip install teslajsonpy")
+    print("ERROR: teslajsonpy not installed. Run: pip install teslajsonpy")
     sys.exit(1)
 
+# Config paths
+CONFIG_DIR = Path.home() / ".clay" / "tesla"
+CONFIG_FILE = CONFIG_DIR / "config.json"
+TOKEN_FILE = CONFIG_DIR / "tokens.json"
 
-class TeslaController:
-    def __init__(self, email: str = None, token: str = None):
-        self.email = email or os.environ.get('TESLA_EMAIL')
-        self.token = token or os.environ.get('TESLA_TOKEN')
+# Ensure config directory exists
+CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def load_tokens():
+    """Load Tesla API tokens from file."""
+    if TOKEN_FILE.exists():
+        with open(TOKEN_FILE, 'r') as f:
+            return json.load(f)
+    return None
+
+
+def save_tokens(tokens):
+    """Save Tesla API tokens to file."""
+    with open(TOKEN_FILE, 'w') as f:
+        json.dump(tokens, f, indent=2)
+
+
+def authenticate(email, password):
+    """Authenticate with Tesla API and save tokens."""
+    print(f"Authenticating with Tesla API for {email}...")
+    try:
+        # Create API connection
+        api = Tesla(email, password)
         
-        if not self.email or not self.token:
-            raise ValueError("Tesla email and token required. Set TESLA_EMAIL and TESLA_TOKEN env vars or use --email and --token flags.")
+        # Get tokens
+        tokens = api.get_tokens()
         
-        self.controller = teslajsonpy.Controller()
-        self.controller.api_login(self.email, self.token)
-        self.vehicles = self.controller.api('vehicles')['response']
-        
-        if not self.vehicles:
-            raise ValueError("No vehicles found linked to this Tesla account.")
-        
-        # Use the first vehicle (Robb's Model 3)
-        self.vehicle = self.vehicles[0]
-        self.vin = self.vehicle['vin']
-        
-    def get_vehicle(self):
-        """Get full vehicle data"""
-        return self.controller.api(f'vehicles/{self.vin}/vehicle_data')['response']
-    
-    def wake(self):
-        """Wake up the vehicle"""
-        result = self.controller.api(f'vehicles/{self.vin}/wake_up')['response']
-        return result
-    
-    def status(self, verbose: bool = False):
-        """Get vehicle status"""
-        data = self.get_vehicle()
-        
-        # Extract key info
-        state = data.get('vehicle_state', {})
-        charge = data.get('charge_state', {})
-        climate = data.get('climate_state', {})
-        drive = data.get('drive_state', {})
-        loc = data.get('drive_state', {}).get('gps_as_of', 0)
-        
-        result = {
-            'name': self.vehicle['display_name'],
-            'state': data.get('state', 'unknown'),
-            'locked': state.get('locked', True),
-            'frunk_open': state.get('front_trunk_open', False),
-            'rear_trunk_open': state.get('rear_trunk_open', False),
-            'windows_open': any(state.get('windows_state', {}).values()) if state.get('windows_state') else False,
-            'sentry_mode': state.get('sentry_mode', False),
-            ' battery': charge.get('battery_level', 0),
-            'charging': charge.get('charging_state', 'Disconnected'),
-            'charge_limit': charge.get('charge_limit_soc', 100),
-            'range_miles': charge.get('est_battery_range', 0),
-            'temp_outside': climate.get('outside_temp', 0),
-            'temp_cabin': climate.get('cabin_temp', 0),
-            'driver_temp': climate.get('driver_temp_setting', 0),
-            'passenger_temp': climate.get('passenger_temp_setting', 0),
-            'climate_on': climate.get('is_climate_on', False),
-        }
-        
-        if verbose:
-            result.update({
-                'speed': drive.get('speed', 0),
-                'heading': drive.get('heading', 0),
-                'shift_state': drive.get('shift_state', 'P'),
-                'location': f"{drive.get('latitude', 0)}, {drive.get('longitude', 0)}" if drive.get('latitude') else "Unknown",
-            })
-        
-        return result
-    
-    def lock(self):
-        """Lock the vehicle"""
-        return self.controller.api(f'vehicles/{self.vin}/command/doors', {'lock': True})['response']
-    
-    def unlock(self):
-        """Unlock the vehicle"""
-        return self.controller.api(f'vehicles/{self.vin}/command/doors', {'lock': False})['response']
-    
-    def honk(self):
-        """Honk the horn"""
-        return self.controller.api(f'vehicles/{self.vin}/command/honk_horn')['response']
-    
-    def flash(self):
-        """Flash the lights"""
-        return self.controller.api(f'vehicles/{self.vin}/command/flash_lights')['response']
-    
-    def climate(self, temp: float):
-        """Set climate temperature"""
-        return self.controller.api(f'vehicles/{self.vin}/command/set_temps', {
-            'driver_temp': temp,
-            'passenger_temp': temp
-        })['response']
-    
-    def start_climate(self):
-        """Start climate control"""
-        return self.controller.api(f'vehicles/{self.vin}/command/auto_conditioning_start')['response']
-    
-    def stop_climate(self):
-        """Stop climate control"""
-        return self.controller.api(f'vehicles/{self.vin}/command/auto_conditioning_stop')['response']
-    
-    def start(self):
-        """Start remote control (allows driving)"""
-        return self.controller.api(f'vehicles/{self.vin}/command/remote_start', {'password': ''})['response']
-    
-    def stop(self):
-        """Stop remote control"""
-        # Actually this just locks after valet mode
-        return self.controller.api(f'vehicles/{self.vin}/command/door_lock', {'lock': True})['response']
-    
-    def open_trunk(self, which: str = 'rear'):
-        """Open trunk or frunk"""
-        if which == 'frunk' or which == 'front':
-            return self.controller.api(f'vehicles/{self.vin}/command/trunk', {'which_trunk': 'front'})['response']
+        if tokens:
+            save_tokens(tokens)
+            print("✅ Authentication successful! Tokens saved.")
+            return True
         else:
-            return self.controller.api(f'vehicles/{self.vin}/command/trunk', {'which_trunk': 'rear'})['response']
+            print("❌ Authentication failed - no tokens received")
+            return False
+    except Exception as e:
+        print(f"❌ Authentication error: {e}")
+        return False
+
+
+def get_api():
+    """Get authenticated Tesla API instance."""
+    tokens = load_tokens()
+    if not tokens:
+        print("❌ Not authenticated. Run: clay_tesla.py auth <email> <password>")
+        return None
     
-    def charge_limit(self, percent: int):
-        """Set charge limit (0-100)"""
-        percent = max(0, min(100, percent))
-        return self.controller.api(f'vehicles/{self.vin}/command/set_charge_limit', {'percent': percent})['response']
-    
-    def start_charging(self):
-        """Start charging"""
-        return self.controller.api(f'vehicles/{self.vin}/command/charge_start')['response']
-    
-    def stop_charging(self):
-        """Stop charging"""
-        return self.controller.api(f'vehicles/{self.vin}/command/charge_stop')['response']
-    
-    def where(self):
-        """Get vehicle location"""
-        data = self.get_vehicle()
-        drive = data.get('drive_state', {})
+    try:
+        # Re-authenticate with stored tokens
+        api = Tesla(tokens['tokens']['access_token'], tokens['tokens']['refresh_token'], tokens['vehicle_id'])
+        return api
+    except Exception as e:
+        print(f"❌ Error connecting to Tesla API: {e}")
+        return None
+
+
+def list_vehicles(api):
+    """List all vehicles associated with the account."""
+    try:
+        vehicles = api.get_vehicles()
+        print(f"\n🚗 Your Tesla Vehicles:")
+        print("-" * 50)
+        for i, v in enumerate(vehicles):
+            print(f"  {i+1}. {v['display_name']}")
+            print(f"      VIN: {v['vin'][-6:]}")
+            print(f"      ID: {v['id']}")
+        print("-" * 50)
+        return vehicles
+    except Exception as e:
+        print(f"❌ Error listing vehicles: {e}")
+        return []
+
+
+def status(api, vehicle_id=None):
+    """Get vehicle status."""
+    try:
+        vehicles = api.get_vehicles()
         
-        return {
-            'latitude': drive.get('latitude'),
-            'longitude': drive.get('longitude'),
-            'heading': drive.get('heading'),
-            'speed': drive.get('speed'),
-            'gps_as_of': drive.get('gps_as_of')
-        }
+        # Select vehicle
+        if vehicle_id:
+            vehicle = next((v for v in vehicles if str(v['id']) == str(vehicle_id)), None)
+            if not vehicle:
+                print(f"❌ Vehicle {vehicle_id} not found")
+                return
+        else:
+            vehicle = vehicles[0] if vehicles else None
+            
+        if not vehicle:
+            print("❌ No vehicles found")
+            return
+        
+        # Get vehicle data
+        vehicle_data = api.get_vehicle_data(vehicle['id'])
+        
+        print(f"\n🚗 {vehicle['display_name']} Status")
+        print("=" * 50)
+        
+        # Charge state
+        charge = vehicle_data.get('charge_state', {})
+        print(f"🔋 Battery: {charge.get('battery_level', 'N/A')}%")
+        print(f"   Charging: {charge.get('charging_state', 'N/A')}")
+        print(f"   Range: {charge.get('battery_range', 'N/A')} miles")
+        if charge.get('charge_limit_soc'):
+            print(f"   Charge Limit: {charge.get('charge_limit_soc')}%")
+        
+        # Climate
+        climate = vehicle_data.get('climate_state', {})
+        print(f"🌡️ Climate:")
+        print(f"   Cabin Temp: {climate.get('cabin_temp_driver_set', 'N/A')}°F")
+        print(f"   Outside Temp: {climate.get('outside_temp', 'N/A')}°F")
+        print(f"   Running: {climate.get('is_climate_on', False)}")
+        
+        # Location
+        drive = vehicle_data.get('drive_state', {})
+        print(f"📍 Location:")
+        print(f"   Shift State: {drive.get('shift_state', 'Parked')}")
+        print(f"   Speed: {drive.get('speed', '0')} mph")
+        lat = drive.get('latitude')
+        lon = drive.get('longitude')
+        if lat and lon:
+            print(f"   Coordinates: {lat}, {lon}")
+        
+        # Vehicle state
+        vehicle_state = vehicle_data.get('vehicle_state', {})
+        print(f"🚙 Vehicle:")
+        print(f"   Locked: {vehicle_state.get('locked', 'N/A')}")
+        print(f"   Frunk: {vehicle_state.get('frunk_open', 'N/A')}")
+        print(f"   Trunk: {vehicle_state.get('trunk_open', 'N/A')}")
+        print(f"   Windows Open: {vehicle_state.get('windows_open', 'N/A')}")
+        print(f"   Sentry Mode: {vehicle_state.get('sentry_mode', 'N/A')}")
+        
+        # Software
+        print(f"💾 Software: {vehicle_state.get('car_version', 'N/A')}")
+        
+        print("=" * 50)
+        
+    except Exception as e:
+        print(f"❌ Error getting status: {e}")
 
 
-def format_status(status: dict, verbose: bool = False) -> str:
-    """Format status for display"""
-    lines = [
-        f"🚗 {status['name']}",
-        f"   State: {status['state']}",
-        f"   🔒 Locked: {'Yes' if status['locked'] else 'No'}",
-        f"   🔋 Battery: {status.get(' battery', 0)}% ({status.get('range_miles', 0)} mi)",
-        f"   ⚡ Charging: {status['charging']}",
-        f"   🌡️ Cabin: {status.get('temp_cabin', 0)}°F (outside {status.get('temp_outside', 0)}°F)",
-        f"   🪟 Windows: {'Open' if status['windows_open'] else 'Closed'}",
-        f"   👁️ Sentry: {'On' if status['sentry_mode'] else 'Off'}",
-    ]
-    
-    if verbose:
-        lines.extend([
-            f"   📍 Location: {status.get('location', 'Unknown')}",
-            f"   🛞 Speed: {status.get('speed', 0)} mph",
-            f"   ⚙️ Gear: {status.get('shift_state', 'P')}",
-        ])
-    
-    return '\n'.join(lines)
+def honk(api, vehicle_id=None):
+    """Honk the horn."""
+    try:
+        vehicles = api.get_vehicles()
+        vehicle = vehicles[0] if not vehicle_id else next((v for v in vehicles if str(v['id']) == str(vehicle_id)), vehicles[0])
+        
+        api.horn(vehicle['id'])
+        print("📢 Honk! Honk! 🔊")
+        return True
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return False
+
+
+def flash(api, vehicle_id=None):
+    """Flash the lights."""
+    try:
+        vehicles = api.get_vehicles()
+        vehicle = vehicles[0] if not vehicle_id else next((v for v in vehicles if str(v['id']) == str(vehicle_id)), vehicles[0])
+        
+        api.flash_lights(vehicle['id'])
+        print("💡 Lights flashed!")
+        return True
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return False
+
+
+def lock(api, vehicle_id=None):
+    """Lock the vehicle."""
+    try:
+        vehicles = api.get_vehicles()
+        vehicle = vehicles[0] if not vehicle_id else next((v for v in vehicles if str(v['id']) == str(vehicle_id)), vehicles[0])
+        
+        api.lock(vehicle['id'])
+        print("🔒 Vehicle locked!")
+        return True
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return False
+
+
+def unlock(api, vehicle_id=None):
+    """Unlock the vehicle."""
+    try:
+        vehicles = api.get_vehicles()
+        vehicle = vehicles[0] if not vehicle_id else next((v for v in vehicles if str(v['id']) == str(vehicle_id)), vehicles[0])
+        
+        api.unlock(vehicle['id'])
+        print("🔓 Vehicle unlocked!")
+        return True
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return False
+
+
+def climate(api, temp, vehicle_id=None):
+    """Set climate temperature."""
+    try:
+        vehicles = api.get_vehicles()
+        vehicle = vehicles[0] if not vehicle_id else next((v for v in vehicles if str(v['id']) == str(vehicle_id)), vehicles[0])
+        
+        api.set_temps(vehicle['id'], temp, temp)
+        print(f"🌡️ Climate set to {temp}°F!")
+        return True
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return False
+
+
+def climate_on(api, vehicle_id=None):
+    """Turn on climate control."""
+    try:
+        vehicles = api.get_vehicles()
+        vehicle = vehicles[0] if not vehicle_id else next((v for v in vehicles if str(v['id']) == str(vehicle_id)), vehicles[0])
+        
+        api.set_auto_conditioning_on(vehicle['id'])
+        print("🌡️ Climate control ON!")
+        return True
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return False
+
+
+def climate_off(api, vehicle_id=None):
+    """Turn off climate control."""
+    try:
+        vehicles = api.get_vehicles()
+        vehicle = vehicles[0] if not vehicle_id else next((v for v in vehicles if str(v['id']) == str(vehicle_id)), vehicles[0])
+        
+        api.set_auto_conditioning_on(vehicle['id'], False)
+        print("🌡️ Climate control OFF!")
+        return True
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return False
+
+
+def start_charging(api, vehicle_id=None):
+    """Start charging."""
+    try:
+        vehicles = api.get_vehicles()
+        vehicle = vehicles[0] if not vehicle_id else next((v for v in vehicles if str(v['id']) == str(vehicle_id)), vehicles[0])
+        
+        api.start_charging(vehicle['id'])
+        print("🔌 Charging started!")
+        return True
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return False
+
+
+def stop_charging(api, vehicle_id=None):
+    """Stop charging."""
+    try:
+        vehicles = api.get_vehicles()
+        vehicle = vehicles[0] if not vehicle_id else next((v for v in vehicles if str(v['id']) == str(vehicle_id)), vehicles[0])
+        
+        api.stop_charging(vehicle['id'])
+        print("🔌 Charging stopped!")
+        return True
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return False
+
+
+def wake(api, vehicle_id=None):
+    """Wake up the vehicle."""
+    try:
+        vehicles = api.get_vehicles()
+        vehicle = vehicles[0] if not vehicle_id else next((v for v in vehicles if str(v['id']) == str(vehicle_id)), vehicles[0])
+        
+        api.wake_up(vehicle['id'])
+        print("☀️ Vehicle waking up...")
+        return True
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return False
+
+
+def open_trunk(api, which="rear", vehicle_id=None):
+    """Open trunk or frunk."""
+    try:
+        vehicles = api.get_vehicles()
+        vehicle = vehicles[0] if not vehicle_id else next((v for v in vehicles if str(v['id']) == str(vehicle_id)), vehicles[0])
+        
+        if which == "frunk":
+            api.actuate_trunk(vehicle['id'], 0)  # 0 = frunk
+            print("👜 Frunk opening...")
+        else:
+            api.actuate_trunk(vehicle['id'], 1)  # 1 = rear trunk
+            print("🚗 Trunk opening...")
+        return True
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return False
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Clay Tesla Control')
-    parser.add_argument('--email', '-e', help='Tesla account email')
-    parser.add_argument('--token', '-t', help='Tesla refresh token')
-    parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output')
-    parser.add_argument('--json', '-j', action='store_true', help='JSON output')
+    parser = argparse.ArgumentParser(
+        description="Clay Tesla - Control your Tesla from command line",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  clay_tesla.py auth email@example.com password    Authenticate with Tesla
+  clay_tesla.py list                                List your vehicles
+  clay_tesla.py status                             Get vehicle status
+  clay_tesla.py lock                               Lock the car
+  clay_tesla.py unlock                             Unlock the car
+  clay_tesla.py climate 72                        Set temp to 72F
+  clay_tesla.py climate-on                        Turn on climate
+  clay_tesla.py honk                               Honk the horn
+  clay_tesla.py flash                              Flash lights
+  clay_tesla.py charge-start                      Start charging
+  clay_tesla.py wake                              Wake up vehicle
+        """
+    )
     
     subparsers = parser.add_subparsers(dest='command', help='Commands')
     
-    # status
-    subparsers.add_parser('status', help='Get vehicle status')
+    # Auth
+    auth_parser = subparsers.add_parser('auth', help='Authenticate with Tesla')
+    auth_parser.add_argument('email', help='Tesla account email')
+    auth_parser.add_argument('password', help='Tesla account password')
     
-    # wake
-    subparsers.add_parser('wake', help='Wake up the vehicle')
+    # List vehicles
+    subparsers.add_parser('list', help='List all vehicles')
     
-    # lock/unlock
-    subparsers.add_parser('lock', help='Lock the vehicle')
-    subparsers.add_parser('unlock', help='Unlock the vehicle')
+    # Status
+    status_parser = subparsers.add_parser('status', help='Get vehicle status')
+    status_parser.add_argument('--id', help='Vehicle ID', default=None)
     
-    # honk/flash
+    # Lock/Unlock
+    subparsers.add_parser('lock', help='Lock vehicle')
+    subparsers.add_parser('unlock', help='Unlock vehicle')
+    
+    # Honk/Flash
     subparsers.add_parser('honk', help='Honk the horn')
-    subparsers.add_parser('flash', help='Flash the lights')
+    subparsers.add_parser('flash', help='Flash lights')
     
-    # climate
+    # Climate
     climate_parser = subparsers.add_parser('climate', help='Set climate temperature')
-    climate_parser.add_argument('temp', type=float, help='Temperature in F')
+    climate_parser.add_argument('temp', type=float, help='Temperature in Fahrenheit')
     
-    # start/stop climate
-    subparsers.add_parser('start', help='Start remote control')
-    subparsers.add_parser('stop', help='Stop remote control')
-    subparsers.add_parser('start-climate', help='Start climate control')
-    subparsers.add_parser('stop-climate', help='Stop climate control')
+    subparsers.add_parser('climate-on', help='Turn on climate control')
+    subparsers.add_parser('climate-off', help='Turn off climate control')
     
-    # charge
-    charge_parser = subparsers.add_parser('charge', help='Set charge limit')
-    charge_parser.add_argument('percent', type=int, help='Charge limit (0-100)')
+    # Charging
+    subparsers.add_parser('charge-start', help='Start charging')
+    subparsers.add_parser('charge-stop', help='Stop charging')
     
-    # open
-    open_parser = subparsers.add_parser('open', help='Open trunk/frunk')
-    open_parser.add_argument('which', choices=['trunk', 'frunk', 'rear', 'front'], default='trunk')
+    # Wake
+    subparsers.add_parser('wake', help='Wake up vehicle')
     
-    # where
-    subparsers.add_parser('where', help='Get vehicle location')
+    # Trunk
+    trunk_parser = subparsers.add_parser('trunk', help='Open trunk/frunk')
+    trunk_parser.add_argument('which', nargs='?', choices=['frunk', 'rear'], default='rear', help='Which to open')
+    
+    # JSON output
+    parser.add_argument('--json', action='store_true', help='JSON output')
     
     args = parser.parse_args()
     
-    if not args.command:
-        parser.print_help()
-        return
+    # Handle commands
+    if args.command == 'auth':
+        success = authenticate(args.email, args.password)
+        sys.exit(0 if success else 1)
     
-    try:
-        controller = TeslaController(args.email, args.token)
-        
-        if args.command == 'status':
-            status = controller.status(verbose=args.verbose)
-            if args.json:
-                print(json.dumps(status, indent=2))
-            else:
-                print(format_status(status, verbose=args.verbose))
-                
-        elif args.command == 'wake':
-            result = controller.wake()
-            print(f"🚗 Waking up... State: {result.get('state')}")
-            
-        elif args.command == 'lock':
-            result = controller.lock()
-            print(f"🔒 Locked: {result.get('response', {}).get('locked', result)}")
-            
-        elif args.command == 'unlock':
-            result = controller.unlock()
-            print(f"🔓 Unlocked: {not result.get('response', {}).get('locked', not result)}")
-            
-        elif args.command == 'honk':
-            result = controller.honk()
-            print(f"📢 Honked: {result.get('response', {}).get('honk', result)}")
-            
-        elif args.command == 'flash':
-            result = controller.flash()
-            print(f"💡 Flashed: {result.get('response', {}).get('lights', result)}")
-            
-        elif args.command == 'climate':
-            result = controller.climate(args.temp)
-            print(f"🌡️ Climate set to {args.temp}°F")
-            
-        elif args.command == 'start':
-            result = controller.start()
-            print(f"▶️ Remote start: {result}")
-            
-        elif args.command == 'stop':
-            result = controller.stop()
-            print(f"⏹️ Remote stop: {result}")
-            
-        elif args.command == 'start-climate':
-            result = controller.start_climate()
-            print(f"🌡️ Climate started: {result.get('response', result)}")
-            
-        elif args.command == 'stop-climate':
-            result = controller.stop_climate()
-            print(f"🌡️ Climate stopped: {result.get('response', result)}")
-            
-        elif args.command == 'charge':
-            result = controller.charge_limit(args.percent)
-            print(f"🔋 Charge limit set to {args.percent}%")
-            
-        elif args.command == 'open':
-            which = args.which
-            if which in ['front', 'frunk']:
-                result = controller.open_trunk('front')
-                print(f"👜 Frunk opened: {result.get('response', result)}")
-            else:
-                result = controller.open_trunk('rear')
-                print(f"📦 Trunk opened: {result.get('response', result)}")
-                
-        elif args.command == 'where':
-            loc = controller.where()
-            if args.json:
-                print(json.dumps(loc, indent=2))
-            else:
-                print(f"📍 Location: {loc.get('latitude', 0)}, {loc.get('longitude', 0)}")
-                print(f"   Heading: {loc.get('heading', 0)}° | Speed: {loc.get('speed', 0)} mph")
-                
-    except ValueError as e:
-        print(f"Error: {e}")
+    # Get API for other commands
+    api = get_api()
+    if not api and args.command not in ['auth']:
         sys.exit(1)
-    except Exception as e:
-        print(f"Error: {e}")
-        sys.exit(1)
+    
+    if args.command == 'list':
+        list_vehicles(api)
+    elif args.command == 'status':
+        status(api, args.id)
+    elif args.command == 'lock':
+        lock(api)
+    elif args.command == 'unlock':
+        unlock(api)
+    elif args.command == 'honk':
+        honk(api)
+    elif args.command == 'flash':
+        flash(api)
+    elif args.command == 'climate':
+        climate(api, args.temp)
+    elif args.command == 'climate-on':
+        climate_on(api)
+    elif args.command == 'climate-off':
+        climate_off(api)
+    elif args.command == 'charge-start':
+        start_charging(api)
+    elif args.command == 'charge-stop':
+        stop_charging(api)
+    elif args.command == 'wake':
+        wake(api)
+    elif args.command == 'trunk':
+        open_trunk(api, args.which)
+    else:
+        parser.print_help()
 
 
 if __name__ == '__main__':

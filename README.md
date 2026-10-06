@@ -1,110 +1,120 @@
-# clay-tesla 🚗
+# clay-tesla 🏎️
 
-Tesla CLI control tool for Clay - Control your Tesla Model 3 via command line.
+CLI tool to control your Tesla vehicle via the Tesla API.
 
-## Features
+## Prerequisites
 
-- 🔋 **Status** - Get battery, charging, climate, lock status
-- 🔒 **Lock/Unlock** - Remote lock and unlock
-- 📢 **Honk/Flash** - Honk horn or flash lights
-- 🌡️ **Climate** - Set temperature, start/stop climate control
-- 🔌 **Charge** - Set charge limit, start/stop charging
-- 📍 **Location** - Get GPS coordinates
-- 👜 **Trunks** - Open frunk or trunk
-- 👀 **Wake** - Wake up the vehicle
+- Python 3.9+
+- `teslajsonpy` library (pre-installed)
+- Tesla account with vehicle
 
-## Requirements
+## Installation
 
 ```bash
-pip install teslajsonpy
+# Already available in your workspace
+ln -s projects/clay-tesla/clay_tesla.py tools/clay_tesla.py
 ```
 
-## Setup
+## Authentication
 
-### Get Tesla Refresh Token
-
-1. Go to https://tesla-api.timdorr.org/
-2. Follow the instructions to get your refresh token
-3. Or use the Tesla Token Generator: https://tesla-token-generator.com/
-
-### Configure Environment
+First, authenticate with your Tesla account:
 
 ```bash
-# Add to your shell profile (.zshrc, etc.)
-export TESLA_EMAIL="your@email.com"
-export TESLA_TOKEN="your_refresh_token"
+python3 tools/clay_tesla.py auth <email> <password>
 ```
 
-Or pass credentials via command line:
+Example:
 ```bash
-python3 clay_tesla.py --email "your@email.com" --token "your_token" status
+python3 tools/clay_tesla.py auth robb99@gmail.com MySecretPassword123
 ```
 
-## Usage
+Tokens are saved to `~/.clay/tesla/tokens.json` for future use.
+
+## Commands
+
+### List Vehicles
+```bash
+python3 tools/clay_tesla.py list
+```
+
+### Get Vehicle Status
+```bash
+python3 tools/clay_tesla.py status
+```
+
+Shows:
+- 🔋 Battery level and charging status
+- 🌡️ Cabin temperature and climate state
+- 📍 Location (shift state, speed, coordinates)
+- 🚙 Lock status, windows, trunk, sentry mode
+- 💾 Software version
+
+### Lock/Unlock
+```bash
+python3 tools/clay_tesla.py lock      # Lock vehicle
+python3 tools/clay_tesla.py unlock    # Unlock vehicle
+```
+
+### Climate Control
+```bash
+python3 tools/clay_tesla.py climate 72     # Set temp to 72°F
+python3 tools/clay_tesla.py climate-on     # Turn on climate
+python3 tools/clay_tesla.py climate-off    # Turn off climate
+```
+
+### Honk & Flash
+```bash
+python3 tools/clay_tesla.py honk    # Honk the horn
+python3 tools/clay_tesla.py flash  # Flash lights
+```
+
+### Charging
+```bash
+python3 tools/clay_tesla.py charge-start   # Start charging
+python3 tools/clay_tesla.py charge-stop   # Stop charging
+```
+
+### Wake Vehicle
+```bash
+python3 tools/clay_tesla.py wake    # Wake up vehicle (required for commands)
+```
+
+### Open Trunk/Frunk
+```bash
+python3 tools/clay_tesla.py trunk           # Open rear trunk
+python3 tools/clay_tesla.py trunk frunk    # Open frunk
+```
+
+## JSON Output
+
+All commands support `--json` for scripting:
 
 ```bash
-# Get vehicle status
-python3 clay_tesla.py status
-python3 clay_tesla.py status --verbose  # More details
-
-# Lock/unlock
-python3 clay_tesla.py lock
-python3 clay_tesla.py unlock
-
-# Honk and flash
-python3 clay_tesla.py honk
-python3 clay_tesla.py flash
-
-# Climate control
-python3 clay_tesla.py climate 72       # Set to 72F
-python3 clay_tesla.py start-climate   # Start climate
-python3 clay_tesla.py stop-climate    # Stop climate
-
-# Charge
-python3 clay_tesla.py charge 80      # Set limit to 80%
-python3 clay_tesla.py start-charging
-python3 clay_tesla.py stop-charging
-
-# Trunks
-python3 clay_tesla.py open trunk       # Open rear trunk
-python3 clay_tesla.py open frunk       # Open frunk
-
-# Location
-python3 clay_tesla.py where            # Get GPS coordinates
-
-# Wake
-python3 clay_tesla.py wake            # Wake up vehicle
-
-# JSON output
-python3 clay_tesla.py status --json
-python3 clay_tesla.py where --json
-```
-
-## Example Output
-
-```
-🚗 Model 3 Performance
-   State: sleeping
-   🔒 Locked: Yes
-   🔋 Battery: 72% (215 mi)
-   ⚡ Charging: Disconnected
-   🌡️ Cabin: 68°F (outside 55°F)
-   🪟 Windows: Closed
-   👁️ Sentry: Off
+python3 tools/clay_tesla.py status --json
 ```
 
 ## Use Cases
 
-- **Precondition** - Start climate before leaving
-- **Find car** - Flash lights in parking lot
-- **Security** - Lock remotely, check status
-- **Charging** - Set charge limit, monitor
-- **Delivery** - Open trunk for package delivery
+- **Pre-condition**: Set climate before leaving
+- **Find car**: Flash lights in a parking lot
+- **Check charge**: Verify battery level remotely
+- **Lock check**: Verify car is locked
+- **Wake**: Wake up vehicle before remote commands
+- **Delivery**: Open trunk for package delivery
 
-## Integration with Clay
+## Troubleshooting
 
-This tool can be used by Clay for:
-- "What's my car's status?" → Reads battery, charging, location
-- "Lock the car" → Locks Tesla
-- "Warm up the car" → Starts climate
-- "Where is my car?" → Gets GPS location
+**"Not authenticated"**: Run `auth` command first
+
+**"Vehicle asleep"**: Run `wake` command, wait a few seconds, then retry command
+
+**Token expired**: Re-run `auth` command to refresh tokens
+
+## File Location
+
+- Token storage: `~/.clay/tesla/tokens.json`
+- Project: `projects/clay-tesla/`
+
+## GitHub
+
+https://github.com/robb99/clay-tesla
