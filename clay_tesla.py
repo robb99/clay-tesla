@@ -5,17 +5,18 @@ Control your Tesla from the command line using the Tesla API.
 """
 
 import argparse
+import asyncio
 import json
 import os
 import sys
-import subprocess
+import aiohttp
 from pathlib import Path
+import getpass
 
 # Try to import teslajsonpy
 try:
-    import teslajsonpy
-    from teslajsonpy import Tesla
     from teslajsonpy.controller import Controller
+    from teslajsonpy import TeslaCar
 except ImportError:
     print("ERROR: teslajsonpy not installed. Run: pip install teslajsonpy")
     sys.exit(1)
@@ -43,54 +44,69 @@ def save_tokens(tokens):
         json.dump(tokens, f, indent=2)
 
 
-def authenticate(email, password):
+async def authenticate_async(email, password):
     """Authenticate with Tesla API and save tokens."""
     print(f"Authenticating with Tesla API for {email}...")
     try:
-        # Create API connection
-        api = Tesla(email, password)
-        
-        # Get tokens
-        tokens = api.get_tokens()
-        
-        if tokens:
+        async with aiohttp.ClientSession() as session:
+            controller = Controller(session)
+            await controller.async_login(email, password)
+            
+            # Save tokens
+            tokens = {
+                'access_token': controller.access_token,
+                'refresh_token': controller.refresh_token,
+                'expiration': controller.token_expiration
+            }
             save_tokens(tokens)
+            
+            # Get vehicles
+            await controller.async_get_vehicles()
+            
             print("✅ Authentication successful! Tokens saved.")
-            return True
-        else:
-            print("❌ Authentication failed - no tokens received")
-            return False
+            return controller
     except Exception as e:
         print(f"❌ Authentication error: {e}")
-        return False
+        return None
 
 
-def get_api():
-    """Get authenticated Tesla API instance."""
+def get_controller():
+    """Get authenticated Tesla Controller instance."""
     tokens = load_tokens()
     if not tokens:
-        print("❌ Not authenticated. Run: clay_tesla.py auth <email> <password>")
+        print("❌ Not authenticated. Run: clay_tesla.py auth <email>")
+        print("   (Password will be prompted securely)")
         return None
     
     try:
-        # Re-authenticate with stored tokens
-        api = Tesla(tokens['tokens']['access_token'], tokens['tokens']['refresh_token'], tokens['vehicle_id'])
-        return api
+        async def run():
+            async with aiohttp.ClientSession() as session:
+                controller = Controller(session)
+                controller.access_token = tokens.get('access_token')
+                controller.refresh_token = tokens.get('refresh_token')
+                controller.token_expiration = tokens.get('expiration', 0)
+                
+                # Test and refresh if needed
+                await controller.async_get_vehicles()
+                return controller
+        
+        return asyncio.run(run())
     except Exception as e:
         print(f"❌ Error connecting to Tesla API: {e}")
+        print("   Try re-authenticating with: clay_tesla.py auth <email>")
         return None
 
 
-def list_vehicles(api):
+def list_vehicles(controller):
     """List all vehicles associated with the account."""
     try:
-        vehicles = api.get_vehicles()
+        vehicles = controller.cars
         print(f"\n🚗 Your Tesla Vehicles:")
         print("-" * 50)
         for i, v in enumerate(vehicles):
-            print(f"  {i+1}. {v['display_name']}")
-            print(f"      VIN: {v['vin'][-6:]}")
-            print(f"      ID: {v['id']}")
+            print(f"  {i+1}. {v.display_name}")
+            print(f"      VIN: {v.vin[-6:]}")
+            print(f"      ID: {v.vin}")
         print("-" * 50)
         return vehicles
     except Exception as e:
@@ -98,66 +114,48 @@ def list_vehicles(api):
         return []
 
 
-def status(api, vehicle_id=None):
+def get_status(controller):
     """Get vehicle status."""
     try:
-        vehicles = api.get_vehicles()
-        
-        # Select vehicle
-        if vehicle_id:
-            vehicle = next((v for v in vehicles if str(v['id']) == str(vehicle_id)), None)
-            if not vehicle:
-                print(f"❌ Vehicle {vehicle_id} not found")
-                return
-        else:
-            vehicle = vehicles[0] if vehicles else None
-            
-        if not vehicle:
+        vehicles = controller.cars
+        if not vehicles:
             print("❌ No vehicles found")
             return
         
-        # Get vehicle data
-        vehicle_data = api.get_vehicle_data(vehicle['id'])
+        vehicle = vehicles[0]
         
-        print(f"\n🚗 {vehicle['display_name']} Status")
+        print(f"\n🚗 {vehicle.display_name} Status")
         print("=" * 50)
         
         # Charge state
-        charge = vehicle_data.get('charge_state', {})
-        print(f"🔋 Battery: {charge.get('battery_level', 'N/A')}%")
-        print(f"   Charging: {charge.get('charging_state', 'N/A')}")
-        print(f"   Range: {charge.get('battery_range', 'N/A')} miles")
-        if charge.get('charge_limit_soc'):
-            print(f"   Charge Limit: {charge.get('charge_limit_soc')}%")
+        print(f"🔋 Battery: {vehicle.battery_level}%")
+        print(f"   Charging: {vehicle.charging_state}")
+        print(f"   Range: {vehicle.battery_range} miles")
+        print(f"   Charge Limit: {vehicle.charge_limit_soc}%")
         
         # Climate
-        climate = vehicle_data.get('climate_state', {})
         print(f"🌡️ Climate:")
-        print(f"   Cabin Temp: {climate.get('cabin_temp_driver_set', 'N/A')}°F")
-        print(f"   Outside Temp: {climate.get('outside_temp', 'N/A')}°F")
-        print(f"   Running: {climate.get('is_climate_on', False)}")
+        print(f"   Cabin Temp: {vehicle.driver_temp_setting}°F")
+        print(f"   Outside Temp: {vehicle.outside_temp}°F")
+        print(f"   Climate On: {vehicle.is_climate_on}")
         
         # Location
-        drive = vehicle_data.get('drive_state', {})
         print(f"📍 Location:")
-        print(f"   Shift State: {drive.get('shift_state', 'Parked')}")
-        print(f"   Speed: {drive.get('speed', '0')} mph")
-        lat = drive.get('latitude')
-        lon = drive.get('longitude')
-        if lat and lon:
-            print(f"   Coordinates: {lat}, {lon}")
+        print(f"   Shift State: {vehicle.shift_state or 'Parked'}")
+        print(f"   Speed: {vehicle.speed} mph")
+        if vehicle.latitude and vehicle.longitude:
+            print(f"   Coordinates: {vehicle.latitude}, {vehicle.longitude}")
         
         # Vehicle state
-        vehicle_state = vehicle_data.get('vehicle_state', {})
         print(f"🚙 Vehicle:")
-        print(f"   Locked: {vehicle_state.get('locked', 'N/A')}")
-        print(f"   Frunk: {vehicle_state.get('frunk_open', 'N/A')}")
-        print(f"   Trunk: {vehicle_state.get('trunk_open', 'N/A')}")
-        print(f"   Windows Open: {vehicle_state.get('windows_open', 'N/A')}")
-        print(f"   Sentry Mode: {vehicle_state.get('sentry_mode', 'N/A')}")
+        print(f"   Locked: {vehicle.locked}")
+        print(f"   Frunk Open: {vehicle.frunk_open}")
+        print(f"   Trunk Open: {vehicle.trunk_open}")
+        print(f"   Windows Open: {vehicle.windows_open}")
+        print(f"   Sentry Mode: {vehicle.sentry_mode}")
         
         # Software
-        print(f"💾 Software: {vehicle_state.get('car_version', 'N/A')}")
+        print(f"💾 Software: {vehicle.car_version}")
         
         print("=" * 50)
         
@@ -165,13 +163,11 @@ def status(api, vehicle_id=None):
         print(f"❌ Error getting status: {e}")
 
 
-def honk(api, vehicle_id=None):
+async def honk_async(controller):
     """Honk the horn."""
     try:
-        vehicles = api.get_vehicles()
-        vehicle = vehicles[0] if not vehicle_id else next((v for v in vehicles if str(v['id']) == str(vehicle_id)), vehicles[0])
-        
-        api.horn(vehicle['id'])
+        vehicle = controller.cars[0]
+        await vehicle.async_honk()
         print("📢 Honk! Honk! 🔊")
         return True
     except Exception as e:
@@ -179,13 +175,11 @@ def honk(api, vehicle_id=None):
         return False
 
 
-def flash(api, vehicle_id=None):
+async def flash_async(controller):
     """Flash the lights."""
     try:
-        vehicles = api.get_vehicles()
-        vehicle = vehicles[0] if not vehicle_id else next((v for v in vehicles if str(v['id']) == str(vehicle_id)), vehicles[0])
-        
-        api.flash_lights(vehicle['id'])
+        vehicle = controller.cars[0]
+        await vehicle.async_flash_lights()
         print("💡 Lights flashed!")
         return True
     except Exception as e:
@@ -193,41 +187,27 @@ def flash(api, vehicle_id=None):
         return False
 
 
-def lock(api, vehicle_id=None):
-    """Lock the vehicle."""
+async def lock_async(controller, lock=True):
+    """Lock or unlock the vehicle."""
     try:
-        vehicles = api.get_vehicles()
-        vehicle = vehicles[0] if not vehicle_id else next((v for v in vehicles if str(v['id']) == str(vehicle_id)), vehicles[0])
-        
-        api.lock(vehicle['id'])
-        print("🔒 Vehicle locked!")
+        vehicle = controller.cars[0]
+        if lock:
+            await vehicle.async_lock()
+            print("🔒 Vehicle locked!")
+        else:
+            await vehicle.async_unlock()
+            print("🔓 Vehicle unlocked!")
         return True
     except Exception as e:
         print(f"❌ Error: {e}")
         return False
 
 
-def unlock(api, vehicle_id=None):
-    """Unlock the vehicle."""
-    try:
-        vehicles = api.get_vehicles()
-        vehicle = vehicles[0] if not vehicle_id else next((v for v in vehicles if str(v['id']) == str(vehicle_id)), vehicles[0])
-        
-        api.unlock(vehicle['id'])
-        print("🔓 Vehicle unlocked!")
-        return True
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        return False
-
-
-def climate(api, temp, vehicle_id=None):
+async def climate_async(controller, temp):
     """Set climate temperature."""
     try:
-        vehicles = api.get_vehicles()
-        vehicle = vehicles[0] if not vehicle_id else next((v for v in vehicles if str(v['id']) == str(vehicle_id)), vehicles[0])
-        
-        api.set_temps(vehicle['id'], temp, temp)
+        vehicle = controller.cars[0]
+        await vehicle.async_set_temps(temp, temp)
         print(f"🌡️ Climate set to {temp}°F!")
         return True
     except Exception as e:
@@ -235,13 +215,11 @@ def climate(api, temp, vehicle_id=None):
         return False
 
 
-def climate_on(api, vehicle_id=None):
+async def climate_on_async(controller):
     """Turn on climate control."""
     try:
-        vehicles = api.get_vehicles()
-        vehicle = vehicles[0] if not vehicle_id else next((v for v in vehicles if str(v['id']) == str(vehicle_id)), vehicles[0])
-        
-        api.set_auto_conditioning_on(vehicle['id'])
+        vehicle = controller.cars[0]
+        await vehicle.async_set_climate_state(on=True)
         print("🌡️ Climate control ON!")
         return True
     except Exception as e:
@@ -249,13 +227,11 @@ def climate_on(api, vehicle_id=None):
         return False
 
 
-def climate_off(api, vehicle_id=None):
+async def climate_off_async(controller):
     """Turn off climate control."""
     try:
-        vehicles = api.get_vehicles()
-        vehicle = vehicles[0] if not vehicle_id else next((v for v in vehicles if str(v['id']) == str(vehicle_id)), vehicles[0])
-        
-        api.set_auto_conditioning_on(vehicle['id'], False)
+        vehicle = controller.cars[0]
+        await vehicle.async_set_climate_state(on=False)
         print("🌡️ Climate control OFF!")
         return True
     except Exception as e:
@@ -263,41 +239,27 @@ def climate_off(api, vehicle_id=None):
         return False
 
 
-def start_charging(api, vehicle_id=None):
-    """Start charging."""
+async def charge_async(controller, start=True):
+    """Start or stop charging."""
     try:
-        vehicles = api.get_vehicles()
-        vehicle = vehicles[0] if not vehicle_id else next((v for v in vehicles if str(v['id']) == str(vehicle_id)), vehicles[0])
-        
-        api.start_charging(vehicle['id'])
-        print("🔌 Charging started!")
+        vehicle = controller.cars[0]
+        if start:
+            await vehicle.async_start_charging()
+            print("🔌 Charging started!")
+        else:
+            await vehicle.async_stop_charging()
+            print("🔌 Charging stopped!")
         return True
     except Exception as e:
         print(f"❌ Error: {e}")
         return False
 
 
-def stop_charging(api, vehicle_id=None):
-    """Stop charging."""
-    try:
-        vehicles = api.get_vehicles()
-        vehicle = vehicles[0] if not vehicle_id else next((v for v in vehicles if str(v['id']) == str(vehicle_id)), vehicles[0])
-        
-        api.stop_charging(vehicle['id'])
-        print("🔌 Charging stopped!")
-        return True
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        return False
-
-
-def wake(api, vehicle_id=None):
+async def wake_async(controller):
     """Wake up the vehicle."""
     try:
-        vehicles = api.get_vehicles()
-        vehicle = vehicles[0] if not vehicle_id else next((v for v in vehicles if str(v['id']) == str(vehicle_id)), vehicles[0])
-        
-        api.wake_up(vehicle['id'])
+        vehicle = controller.cars[0]
+        await vehicle.async_wake_up()
         print("☀️ Vehicle waking up...")
         return True
     except Exception as e:
@@ -305,17 +267,15 @@ def wake(api, vehicle_id=None):
         return False
 
 
-def open_trunk(api, which="rear", vehicle_id=None):
+async def trunk_async(controller, which="rear"):
     """Open trunk or frunk."""
     try:
-        vehicles = api.get_vehicles()
-        vehicle = vehicles[0] if not vehicle_id else next((v for v in vehicles if str(v['id']) == str(vehicle_id)), vehicles[0])
-        
+        vehicle = controller.cars[0]
         if which == "frunk":
-            api.actuate_trunk(vehicle['id'], 0)  # 0 = frunk
+            await vehicle.async_actuate_trunk(0)
             print("👜 Frunk opening...")
         else:
-            api.actuate_trunk(vehicle['id'], 1)  # 1 = rear trunk
+            await vehicle.async_actuate_trunk(1)
             print("🚗 Trunk opening...")
         return True
     except Exception as e:
@@ -329,17 +289,17 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  clay_tesla.py auth email@example.com password    Authenticate with Tesla
-  clay_tesla.py list                                List your vehicles
-  clay_tesla.py status                             Get vehicle status
-  clay_tesla.py lock                               Lock the car
-  clay_tesla.py unlock                             Unlock the car
-  clay_tesla.py climate 72                        Set temp to 72F
-  clay_tesla.py climate-on                        Turn on climate
-  clay_tesla.py honk                               Honk the horn
-  clay_tesla.py flash                              Flash lights
-  clay_tesla.py charge-start                      Start charging
-  clay_tesla.py wake                              Wake up vehicle
+  clay_tesla.py auth email@example.com    Authenticate with Tesla
+  clay_tesla.py list                     List your vehicles
+  clay_tesla.py status                  Get vehicle status
+  clay_tesla.py lock                    Lock the car
+  clay_tesla.py unlock                  Unlock the car
+  clay_tesla.py climate 72              Set temp to 72F
+  clay_tesla.py climate-on              Turn on climate
+  clay_tesla.py honk                    Honk the horn
+  clay_tesla.py flash                   Flash lights
+  clay_tesla.py charge-start            Start charging
+  clay_tesla.py wake                    Wake up vehicle
         """
     )
     
@@ -347,15 +307,13 @@ Examples:
     
     # Auth
     auth_parser = subparsers.add_parser('auth', help='Authenticate with Tesla')
-    auth_parser.add_argument('email', help='Tesla account email')
-    auth_parser.add_argument('password', help='Tesla account password')
+    auth_parser.add_argument('email', nargs='?', help='Tesla account email')
     
     # List vehicles
     subparsers.add_parser('list', help='List all vehicles')
     
     # Status
-    status_parser = subparsers.add_parser('status', help='Get vehicle status')
-    status_parser.add_argument('--id', help='Vehicle ID', default=None)
+    subparsers.add_parser('status', help='Get vehicle status')
     
     # Lock/Unlock
     subparsers.add_parser('lock', help='Lock vehicle')
@@ -388,42 +346,50 @@ Examples:
     
     args = parser.parse_args()
     
-    # Handle commands
+    # Handle auth command
     if args.command == 'auth':
-        success = authenticate(args.email, args.password)
-        sys.exit(0 if success else 1)
+        if not args.email:
+            email = input("Tesla email: ")
+        else:
+            email = args.email
+        
+        password = getpass.getpass("Tesla password: ")
+        
+        controller = asyncio.run(authenticate_async(email, password))
+        sys.exit(0 if controller else 1)
     
-    # Get API for other commands
-    api = get_api()
-    if not api and args.command not in ['auth']:
+    # Get controller for other commands
+    controller = get_controller()
+    if not controller and args.command not in ['auth']:
         sys.exit(1)
     
+    # Execute commands
     if args.command == 'list':
-        list_vehicles(api)
+        list_vehicles(controller)
     elif args.command == 'status':
-        status(api, args.id)
+        get_status(controller)
     elif args.command == 'lock':
-        lock(api)
+        asyncio.run(lock_async(controller, lock=True))
     elif args.command == 'unlock':
-        unlock(api)
+        asyncio.run(lock_async(controller, lock=False))
     elif args.command == 'honk':
-        honk(api)
+        asyncio.run(honk_async(controller))
     elif args.command == 'flash':
-        flash(api)
+        asyncio.run(flash_async(controller))
     elif args.command == 'climate':
-        climate(api, args.temp)
+        asyncio.run(climate_async(controller, args.temp))
     elif args.command == 'climate-on':
-        climate_on(api)
+        asyncio.run(climate_on_async(controller))
     elif args.command == 'climate-off':
-        climate_off(api)
+        asyncio.run(climate_off_async(controller))
     elif args.command == 'charge-start':
-        start_charging(api)
+        asyncio.run(charge_async(controller, start=True))
     elif args.command == 'charge-stop':
-        stop_charging(api)
+        asyncio.run(charge_async(controller, start=False))
     elif args.command == 'wake':
-        wake(api)
+        asyncio.run(wake_async(controller))
     elif args.command == 'trunk':
-        open_trunk(api, args.which)
+        asyncio.run(trunk_async(controller, args.which))
     else:
         parser.print_help()
 
